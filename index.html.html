@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            padding: 15px;
+            background: transparent;
+            margin: 0;
+            color: #333;
+        }
+
+        .hot-panel {
+            border-left: 5px solid #ef4444; /* Красная полоса слева */
+            background-color: #fff;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 12px;
+            border-radius: 4px;
+        }
+
+        h4 { margin: 0 0 10px 0; color: #dc2626; font-size: 16px; }
+        p.desc { margin: 0 0 12px 0; font-size: 13px; color: #666; line-height: 1.4; }
+
+        .issue-item {
+            display: flex;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .issue-item:last-child { border-bottom: none; }
+
+        .icon-box {
+            width: 32px; height: 32px; 
+            border-radius: 8px; display: flex; align-items: center; justify-content: center;
+            font-size: 18px; margin-right: 10px; flex-shrink: 0;
+        }
+        .bg-danger { background-color: #fee2e2; color: #b91c1c; }
+        .bg-warning { background-color: #fef3c7; color: #d97706; }
+        .bg-success { background-color: #dcfce7; color: #16a34a; }
+
+        .issue-text { flex-grow: 1; }
+        .issue-text strong { display: block; margin-bottom: 2px; }
+        .issue-hint { font-size: 12px; color: #9ca3af; }
+
+        .btn-quick {
+            background: #3b82f6; color: white; border: none; padding: 6px 12px;
+            border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;
+            text-decoration: none; display: inline-block;
+        }
+        .btn-quick:hover { background: #2563eb; }
+        .btn-done {
+            background: #cbd5e1; color: #475569; border: none; padding: 4px 8px;
+            border-radius: 4px; cursor: pointer; font-size: 11px; margin-left: 8px;
+        }
+        .btn-done:hover { background: #94a3b8; color: white; }
+
+        /* Статус "Выполнено" */
+        .is-fixed { opacity: 0.6; text-decoration: line-through; color: #999; }
+    </style>
+</head>
+<body>
+    <div class="hot-panel">
+        <h4>🔥 Горячие точки сделки</h4>
+        <p class="desc">Здесь видно, где есть риски или что нужно сделать прямо сейчас.</p>
+        
+        <div id="issues-list"></div>
+
+        <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid #eee;">
+            <strong>Быстрые действия:</strong>
+            <br><br>
+            <button class="btn-quick" onclick="createTask()">➕ Создать задачу</button>
+            <button class="btn-quick" style="background:#2ecc71" onclick="callClient()">📞 Позвонить</button>
+            <button class="btn-quick" style="background:#25d366" onclick="whatsapp()">💬 WhatsApp</button>
+        </div>
+    </div>
+
+    <!-- SDK amoCRM -->
+    <script src="https://static.amocrm.com/widgets/sdk.js"></script>
+    <script>
+        AmoWidgets.init(function(amo) {
+            const dealId = amo.currentEntityId;
+            const userId = amo.user.id;
+            
+            // Список проблем, которые мы нашли
+            const issues = [];
+
+            // --- ПРОВЕРКА 1: Просроченные задачи ---
+            // В интерфейсе amoCRM мы можем проверить текст задач на наличие "просрочено" или даты, 
+            // но надежнее искать по визуальным маркерам или тексту.
+            const tasks = document.querySelectorAll('.task-list-item, [data-testid="task-row"]');
+            tasks.forEach(task => {
+                const text = task.innerText.toLowerCase();
+                if (text.includes('просрочено') || text.includes('overdue')) {
+                    issues.push({
+                        type: 'danger',
+                        icon: '⏰',
+                        title: 'Просроченная задача!',
+                        desc: 'Есть задача с дедлайном, который уже прошел.',
+                        action: 'Создать новую задачу'
+                    });
+                }
+            });
+
+            // --- ПРОВЕРКА 2: Нет активности (3+ дня) ---
+            // Для этого нужен API, но чтобы не усложнять код токенами, сделаем эвристику:
+            // Если в карточке нет недавних событий (по тексту "сегодня", "вчера"), считаем, что тишина.
+            // Это упрощенная версия. Для точного расчета даты нужен запрос к API /leads/events.
+            const eventsText = document.body.innerText.toLowerCase();
+            if (!eventsText.includes('сегодня') && !eventsText.includes('вчера')) {
+                 // Примечание: это грубая проверка. В продакшене лучше делать запрос к API событий.
+                 // Здесь мы просто добавляем предупреждение, если менеджер еще не смотрел карточку внимательно.
+                 issues.push({
+                    type: 'warning',
+                    icon: '🤫',
+                    title: 'Давно не было активности',
+                    desc: 'В истории сделки нет событий за последние дни. Проверьте, не остывает ли клиент.',
+                    action: 'Добавить событие'
+                });
+            }
+
+            // --- ПРОВЕРКА 3: Незаполненные важные поля ---
+            // Ищем поля по названиям. Если у тебя кастомные поля называются иначе — поменяй текст ниже.
+            const requiredFields = ['бюджет', 'дата встречи', 'ответственный'];
+            let missingFields = [];
+            
+            requiredFields.forEach(field => {
+                // Ищем элемент, где есть название поля и рядом нет значения
+                // Это эвристика: ищем контейнер поля и проверяем, пустой ли он
+                const fieldElements = document.querySelectorAll(`[class*="field"], .deal-field`);
+                // Упрощенно: если в тексте карточки нет названия поля ИЛИ поле пустое (зависит от верстки)
+                // Самый надежный способ без API — проверить, есть ли слово "бюджет" и нет ли рядом цифр.
+                // Но для виджета сделаем проще: если мы не видим явного значения в DOM, считаем его пустым.
+                
+                // ВАЖНО: Из-за сложной верстки amoCRM точный поиск пустых полей без API сложен.
+                // Этот блок добавляет рекомендацию проверить поля, если они не бросаются в глаза.
+                if (!eventsText.includes(field)) {
+                     // Это очень грубая проверка, лучше использовать API для проверки заполненности
+                }
+            });
+            
+            // Добавим пункт "Проверьте важные поля" как напоминание, если мы не можем точно определить пустоту через DOM
+            issues.push({
+                type: 'warning',
+                icon: '📋',
+                title: 'Проверьте обязательные поля',
+                desc: 'Убедитесь, что заполнены: Бюджет, Дата встречи, Ответственный.',
+                action: 'Заполнить поля'
+            });
+
+            // --- ОТРИСОВКА СПИСКА ---
+            const listEl = document.getElementById('issues-list');
+            
+            if (issues.length === 0) {
+                listEl.innerHTML = '<p style="color:#666; font-style:italic;">Рисков не найдено. Всё под контролем! ✅</p>';
+            } else {
+                issues.forEach((issue, index) => {
+                    const div = document.createElement('div');
+                    div.className = 'issue-item';
+                    
+                    let bgClass = 'bg-danger';
+                    if (issue.type === 'warning') bgClass = 'bg-warning';
+                    if (issue.type === 'success') bgClass = 'bg-success';
+
+                    div.innerHTML = `
+                        <div class="icon-box ${bgClass}">${issue.icon}</div>
+                        <div class="issue-text">
+                            <strong>${issue.title}</strong>
+                            <span class="issue-hint">${issue.desc}</span>
+                        </div>
+                        <button class="btn-done" onclick="this.parentElement.classList.add('is-fixed')">✓ Готово</button>
+                    `;
+                    listEl.appendChild(div);
+                });
+            }
+
+            // --- БЫСТРЫЕ КНОПКИ (Интеграция с amoCRM SDK) ---
+            function createTask() {
+                amo.openCreateForm('task', {
+                    entity_id: dealId,
+                    entity_type: 'leads'
+                });
+            }
+
+            function callClient() {
+                alert('Функция звонка зависит от вашей телефонии. Здесь можно открыть форму создания задачи "Позвонить" или ссылку на софтфон.');
+                // Пример: amo.openCreateForm('task', { entity_id: dealId, text: "Позвонить клиенту" });
+            }
+
+            function whatsapp() {
+                // Тут нужна логика: взять телефон из карточки сделки.
+                // Так как парсить телефон из DOM сложно и ненадежно, даем общий совет.
+                alert('Скопируйте номер телефона из карточки сделки и откройте WhatsApp.');
+            }
+        });
+    </script>
+</body>
+</html>
